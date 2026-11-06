@@ -21,8 +21,7 @@ import {
   FONT_SIZE_MAX,
   FONT_FAMILIES,
   THEMES,
-  createNote,
-  deriveTitle,
+  createNote,  deriveTitle,
   derivePreview,
   computeStats,
   totalStats,
@@ -52,6 +51,23 @@ import {
   explainFailure,
   watchPipSize,
 } from './pip.js';
+
+import {
+  CLIP_STORAGE_KEY,
+  MAX_CLIP_ITEMS,
+  addClip,
+  removeClip,
+  toggleClipPin,
+  updateClipText,
+  clearClips,
+  filterClips,
+  sortClips,
+  clipSummary,
+  clipStats,
+  sourceLabel,
+  serializeClips,
+  deserializeClips,
+} from './clipboard.js';
 
 /* -------------------------------------------------------------------------- */
 /* DOM                                                                         */
@@ -100,6 +116,25 @@ const floatBtnLabel = $('#float-btn-label');
 const btnReturn = $('#btn-return');
 const toastRoot = $('#toast-root');
 
+// Tabs
+const tabNotes = $('#tab-notes');
+const tabClipboard = $('#tab-clipboard');
+const panelNotes = $('#panel-notes');
+const panelClipboard = $('#panel-clipboard');
+const clipCount = $('#clip-count');
+
+// Clipboard panel
+const clipList = $('#clip-list');
+const clipEmpty = $('#clip-empty');
+const clipEmptyTitle = $('#clip-empty-title');
+const clipEmptySub = $('#clip-empty-sub');
+const clipSearch = $('#clip-search');
+const clipSub = $('#clip-sub');
+const btnClipGrab = $('#btn-clip-grab');
+const btnClipAdd = $('#btn-clip-add');
+const btnClipCapture = $('#btn-clip-capture');
+const btnClipClear = $('#btn-clip-clear');
+
 /* -------------------------------------------------------------------------- */
 /* State                                                                       */
 /* -------------------------------------------------------------------------- */
@@ -115,6 +150,17 @@ let unwatchPipSize = () => {};
 let standbyStandalone = false;
 let lastDeleted = null;
 let renderedNoteId = null;
+
+/** Clipboard history, and the filter applied to it. */
+let clips = [];
+let clipQuery = '';
+
+/**
+ * True while *we* are writing to the system clipboard. Without this, our own
+ * copy actions would fire a `copy` event and re-capture the snippet we just
+ * put there — an instant duplicate.
+ */
+let suppressCapture = false;
 
 let saveTimer = null;
 let persistTimer = null;
@@ -449,6 +495,430 @@ function renderTotals() {
   totalsEl.textContent = `${formatCount(t.notes)} ${t.notes === 1 ? 'note' : 'notes'} · ${formatCount(t.words)} words`;
 }
 
+/* -------------------------------------------------------------------------- */
+/* Tabs                                                                        */
+/* -------------------------------------------------------------------------- */
+
+function setTab(name, { focus = false } = {}) {
+  const tab = name === 'clipboard' ? 'clipboard' : 'notes';
+  app.dataset.tab = tab;
+
+  panelNotes.hidden = tab !== 'notes';
+  panelClipboard.hidden = tab !== 'clipboard';
+  tabNotes.setAttribute('aria-selected', String(tab === 'notes'));
+  tabClipboard.setAttribute('aria-selected', String(tab === 'clipboard'));
+
+  if (tab !== prefs.tab) {
+    prefs = normalizePrefs({ ...prefs, tab });
+    persistPrefs();
+  }
+  if (focus) {
+    if (tab === 'clipboard') clipSearch.focus();
+    else focusEditor();
+  }
+}
+
+function toggleTab() {
+  setTab(prefs.tab === 'clipboard' ? 'notes' : 'clipboard', { focus: true });
+}
+
+/* -------------------------------------------------------------------------- */
+/* Clipboard history                                                           */
+/* -------------------------------------------------------------------------- */
+
+function loadClips() {
+  clips = sortClips(deserializeClips(safeRead(CLIP_STORAGE_KEY)));
+}
+
+function persistClips() {
+  return safeWrite(CLIP_STORAGE_KEY, serializeClips(clips));
+}
+
+/**
+ * Add a snippet to the history. Auto-capture stays silent (a toast on every
+ * copy would be unbearable); explicit actions announce themselves.
+ */
+function recordClip(text, source, { notify = false } = {}) {
+  const { clips: next, clip, bumped } = addClip(clips, text, source);
+  if (!clip) return null;
+  clips = next;
+  persistClips();
+  renderClips();
+  renderClipCount();
+  if (notify) {
+    toast(bumped ? 'Moved that snippet to the top' : 'Added to clipboard history', {
+      kind: 'success',
+      duration: 2000,
+    });
+  }
+  return clip;
+}
+
+function renderClips() {
+  const list = sortClips(filterClips(clips, clipQuery));
+  clipList.replaceChildren();
+
+  clipEmpty.hidden = list.length !== 0;
+  if (clips.length === 0) {
+    clipEmptyTitle.textContent = 'Clipboard is empty';
+    clipEmptySub.textContent =
+      'Press Grab to pull in whatever is on your system clipboard, or copy something inside Ecko.';
+  } else if (list.length === 0) {
+    clipEmptyTitle.textContent = 'No matching snippets';
+    clipEmptySub.textContent = `Nothing matches “${clipQuery}”.`;
+  }
+
+  const doc = hostDocument();
+  const frag = doc.createDocumentFragment();
+
+  for (const clip of list) {
+    const li = doc.createElement('li');
+    li.className = 'clip-item';
+    li.dataset.id = clip.id;
+    li.dataset.pinned = String(Boolean(clip.pinned));
+
+    const textBtn = doc.createElement('button');
+    textBtn.type = 'button';
+    textBtn.className = 'clip-text';
+    textBtn.dataset.act = 'copy';
+    textBtn.title = 'Copy this snippet to the system clipboard';
+    textBtn.textContent = clipSummary(clip.text) || '(whitespace only)';
+
+    const row = doc.createElement('div');
+    row.className = 'clip-row';
+
+    const meta = doc.createElement('div');
+    meta.className = 'clip-meta';
+    const time = doc.createElement('span');
+    time.dataset.time = String(clip.createdAt);
+    time.textContent = formatRelativeTime(clip.createdAt);
+    const src = doc.createElement('span');
+    src.className = 'clip-source';
+    src.textContent = sourceLabel(clip.source);
+    const chars = doc.createElement('span');
+    chars.textContent = `${formatCount(clip.text.length)} ch`;
+    meta.append(time, src, chars);
+
+    const actions = doc.createElement('div');
+    actions.className = 'clip-actions';
+    const specs = [
+      ['copy', 'Copy', 'Copy to the system clipboard'],
+      ['insert', 'Insert', 'Insert into the current note'],
+      [
+        'pin',
+        clip.pinned ? 'Unpin' : 'Pin',
+        clip.pinned ? 'Unpin this snippet' : 'Pin this snippet to the top',
+      ],
+      ['delete', 'Delete', 'Delete this snippet'],
+    ];
+    for (const [act, label, title] of specs) {
+      const b = doc.createElement('button');
+      b.type = 'button';
+      b.className = 'clip-action';
+      b.dataset.act = act;
+      b.textContent = label;
+      b.title = title;
+      if (act === 'pin') b.dataset.active = String(Boolean(clip.pinned));
+      actions.append(b);
+    }
+
+    row.append(meta, actions);
+    li.append(textBtn, row);
+    frag.append(li);
+  }
+
+  clipList.append(frag);
+}
+
+function renderClipCount() {
+  const s = clipStats(clips);
+  clipCount.textContent = formatCount(s.clips);
+  clipCount.hidden = s.clips === 0;
+  clipSub.textContent =
+    s.clips === 0
+      ? '0 snippets'
+      : `${formatCount(s.clips)} ${s.clips === 1 ? 'snippet' : 'snippets'}${
+          s.pinned ? ` · ${s.pinned} pinned` : ''
+        }`;
+  if (clips.length >= MAX_CLIP_ITEMS) {
+    clipSub.textContent += ` · capped at ${MAX_CLIP_ITEMS}`;
+  }
+}
+
+/* ------------------------------------------------------- system clipboard -- */
+
+/**
+ * Write to the system clipboard, suppressing our own auto-capture so the
+ * snippet we just stored does not immediately get re-captured.
+ */
+async function writeToSystemClipboard(text) {
+  suppressCapture = true;
+  try {
+    const api = hostWindow().navigator?.clipboard;
+    if (api && typeof api.writeText === 'function') {
+      await api.writeText(text);
+      return true;
+    }
+    return legacyCopy(text);
+  } catch {
+    return legacyCopy(text);
+  } finally {
+    // Defer so any copy event fired by the legacy path is already swallowed.
+    setTimeout(() => {
+      suppressCapture = false;
+    }, 0);
+  }
+}
+
+/** Fallback for browsers/contexts without the async Clipboard API. */
+function legacyCopy(text) {
+  const doc = hostDocument();
+  const ta = doc.createElement('textarea');
+  ta.value = text;
+  ta.setAttribute('readonly', '');
+  ta.style.position = 'fixed';
+  ta.style.top = '-1000px';
+  ta.style.opacity = '0';
+  doc.body.append(ta);
+  ta.select();
+  let ok = false;
+  try {
+    ok = doc.execCommand('copy');
+  } catch {
+    ok = false;
+  }
+  ta.remove();
+  return ok;
+}
+
+/**
+ * Read the system clipboard. This is the only way a web page can see it, and
+ * it needs a user gesture, permission, and a focused document — so it is wired
+ * to an explicit button, never to a timer or page load.
+ */
+async function grabSystemClipboard() {
+  const api = hostWindow().navigator?.clipboard;
+  if (!api || typeof api.readText !== 'function') {
+    toast(
+      'This browser will not let a web page read the system clipboard. Copy the text, then use the + button to store it.',
+      { kind: 'danger', duration: 8000 },
+    );
+    return;
+  }
+
+  let text;
+  try {
+    text = await api.readText();
+  } catch (error) {
+    const denied = error?.name === 'NotAllowedError' || error?.name === 'SecurityError';
+    toast(
+      denied
+        ? 'Clipboard access was denied. Allow it for this site, or copy the text and press Ctrl+V here to capture it.'
+        : 'Could not read the system clipboard.',
+      { kind: 'danger', duration: 8000 },
+    );
+    return;
+  }
+
+  if (!text || !text.trim()) {
+    toast('The system clipboard is empty.', { duration: 2600 });
+    return;
+  }
+  recordClip(text, 'grab', { notify: true });
+}
+
+/** Text the user currently has selected, for copy/cut capture. */
+function currentSelectionText() {
+  const el = hostDocument().activeElement;
+  if (el && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT')) {
+    const { selectionStart: start, selectionEnd: end } = el;
+    if (Number.isFinite(start) && Number.isFinite(end) && end > start) {
+      return String(el.value).slice(start, end);
+    }
+    return '';
+  }
+  try {
+    return hostWindow().getSelection?.()?.toString() || '';
+  } catch {
+    return '';
+  }
+}
+
+function onCaptureEvent(event) {
+  if (suppressCapture || !prefs.captureClipboard) return;
+
+  const text =
+    event.type === 'paste'
+      ? event.clipboardData?.getData('text/plain') || ''
+      : currentSelectionText();
+  if (!text.trim()) return;
+
+  const source = event.type === 'paste' ? 'paste' : event.type === 'cut' ? 'cut' : 'copy';
+  recordClip(text, source);
+}
+
+/* ----------------------------------------------------------- clip actions -- */
+
+function clipById(id) {
+  return clips.find((c) => c.id === id) || null;
+}
+
+async function onClipAction(event) {
+  const btn = event.target.closest('.clip-action, .clip-text');
+  if (!btn) return;
+  const item = btn.closest('.clip-item');
+  if (!item) return;
+  const clip = clipById(item.dataset.id);
+  if (!clip) return;
+
+  switch (btn.dataset.act) {
+    case 'copy': {
+      const ok = await writeToSystemClipboard(clip.text);
+      toast(ok ? 'Copied to system clipboard' : 'Copy failed.', {
+        kind: ok ? 'success' : 'danger',
+        duration: 2000,
+      });
+      break;
+    }
+    case 'insert':
+      insertClipIntoNote(clip.text);
+      break;
+    case 'pin':
+      clips = toggleClipPin(clips, clip.id);
+      persistClips();
+      renderClips();
+      renderClipCount();
+      break;
+    case 'delete': {
+      const removed = clip;
+      clips = removeClip(clips, clip.id);
+      persistClips();
+      renderClips();
+      renderClipCount();
+      toast('Snippet deleted', {
+        kind: 'danger',
+        action: {
+          label: 'Undo',
+          onClick: () => {
+            recordClip(removed.text, removed.source);
+            clips = sortClips(
+              clips.map((c) => (c.text === removed.text ? { ...c, pinned: removed.pinned } : c)),
+            );
+            persistClips();
+            renderClips();
+          },
+        },
+      });
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+function insertClipIntoNote(text) {
+  if (!getActive()) newNote({ focus: false });
+
+  setTab('notes');
+  // Insert at the caret only if the editor actually has focus; otherwise
+  // appending is what the user expects.
+  const focused = hostDocument().activeElement === editor;
+  const start = focused ? editor.selectionStart : editor.value.length;
+  const end = focused ? editor.selectionEnd : editor.value.length;
+
+  editor.setRangeText(text, start, end, 'end');
+  updateActiveBody(editor.value);
+  focusEditor(editor.selectionStart);
+  toast('Inserted into note', { kind: 'success', duration: 1800 });
+}
+
+/** Inline composer, so "Add" never depends on window.prompt(). */
+function beginAddSnippet() {
+  if (clipList.querySelector('.clip-composer')) {
+    clipList.querySelector('.clip-composer-input').focus();
+    return;
+  }
+
+  const doc = hostDocument();
+  const li = doc.createElement('li');
+  li.className = 'clip-item clip-composer';
+
+  const ta = doc.createElement('textarea');
+  ta.className = 'clip-composer-input';
+  ta.rows = 3;
+  ta.placeholder = 'Paste or type the snippet…';
+  ta.setAttribute('aria-label', 'New snippet');
+
+  const row = doc.createElement('div');
+  row.className = 'clip-row';
+  const hint = doc.createElement('div');
+  hint.className = 'clip-meta';
+  hint.textContent = 'Ctrl+Enter to save';
+
+  const actions = doc.createElement('div');
+  actions.className = 'clip-actions';
+  const save = doc.createElement('button');
+  save.type = 'button';
+  save.className = 'clip-action';
+  save.dataset.active = 'true';
+  save.textContent = 'Save';
+  const cancel = doc.createElement('button');
+  cancel.type = 'button';
+  cancel.className = 'clip-action';
+  cancel.textContent = 'Cancel';
+  actions.append(save, cancel);
+
+  row.append(hint, actions);
+  li.append(ta, row);
+  clipList.prepend(li);
+  ta.focus();
+
+  const close = () => li.remove();
+  const commit = () => {
+    const value = ta.value;
+    close();
+    if (!value.trim()) return;
+    recordClip(value, 'manual', { notify: true });
+  };
+
+  save.addEventListener('click', commit);
+  cancel.addEventListener('click', close);
+  ta.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      close();
+    }
+    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault();
+      commit();
+    }
+  });
+}
+
+function clearHistory() {
+  if (clips.length === 0) {
+    toast('Clipboard history is already empty.', { duration: 2000 });
+    return;
+  }
+  const before = clips;
+  clips = clearClips(clips);
+  persistClips();
+  renderClips();
+  renderClipCount();
+  toast(`Cleared ${before.length - clips.length} snippets (pinned kept)`, {
+    kind: 'danger',
+    action: {
+      label: 'Undo',
+      onClick: () => {
+        clips = before;
+        persistClips();
+        renderClips();
+        renderClipCount();
+      },
+    },
+  });
+}
+
 function applyPrefs() {
   app.dataset.font = prefs.fontFamily;
   app.dataset.wrap = prefs.wrap ? 'on' : 'off';
@@ -457,6 +927,10 @@ function applyPrefs() {
   btnToggleSidebar.setAttribute('aria-pressed', String(prefs.sidebarOpen));
   btnWrap.setAttribute('aria-pressed', String(prefs.wrap));
   btnWrap.title = `Soft wrap: ${prefs.wrap ? 'on' : 'off'} (click to toggle)`;
+  btnClipCapture.setAttribute('aria-pressed', String(prefs.captureClipboard));
+  btnClipCapture.title = `Auto-capture copies and pastes inside Ecko: ${
+    prefs.captureClipboard ? 'on' : 'off'
+  }`;
 
   // Theme lives on <html>, so it has to be applied to every document that can
   // currently be showing the app: the tab, and the PiP window if one is open.
@@ -480,6 +954,11 @@ const hostDocuments = () => {
 const GLOBAL_BINDINGS = [
   ['keydown', onKeyDown],
   ['beforeunload', onBeforeUnload],
+  // Capture in-app clipboard activity. These bubble to the window, so binding
+  // here (and re-binding on PiP enter/exit) keeps capture working in both.
+  ['copy', onCaptureEvent],
+  ['cut', onCaptureEvent],
+  ['paste', onCaptureEvent],
 ];
 
 let boundWindow = null;
@@ -502,6 +981,7 @@ function onBeforeUnload() {
     persistTimer = null;
   }
   safeWrite(STORAGE_KEY, serialize(notes));
+  safeWrite(CLIP_STORAGE_KEY, serializeClips(clips));
 }
 
 function isTypingTarget(target) {
@@ -511,17 +991,26 @@ function isTypingTarget(target) {
 
 function onKeyDown(event) {
   const mod = event.metaKey || event.ctrlKey;
+  const onClipboardTab = prefs.tab === 'clipboard';
+
   if (!mod) {
+    // `/` focuses whichever search belongs to the visible tab.
     if (event.key === '/' && !isTypingTarget(event.target)) {
       event.preventDefault();
-      searchInput.focus();
-      searchInput.select();
+      const field = onClipboardTab ? clipSearch : searchInput;
+      field.focus();
+      field.select();
     }
     if (event.key === 'Escape' && event.target === searchInput && query) {
       query = '';
       searchInput.value = '';
       clearSearchBtn.hidden = true;
       renderList();
+    }
+    if (event.key === 'Escape' && event.target === clipSearch && clipQuery) {
+      clipQuery = '';
+      clipSearch.value = '';
+      renderClips();
     }
     return;
   }
@@ -539,6 +1028,21 @@ function onKeyDown(event) {
   if (event.altKey && key === 'n') {
     event.preventDefault();
     newNote();
+    return;
+  }
+
+  // Ctrl/Cmd+Alt+C — switch between the Notes and Clipboard tabs.
+  if (event.altKey && key === 'c') {
+    event.preventDefault();
+    toggleTab();
+    return;
+  }
+
+  // Ctrl/Cmd+Alt+G — grab the system clipboard into the history.
+  if (event.altKey && key === 'g') {
+    event.preventDefault();
+    setTab('clipboard');
+    grabSystemClipboard();
     return;
   }
 
@@ -786,21 +1290,11 @@ async function importFromText(text) {
 async function copyActive() {
   const note = getActive();
   if (!note) return;
-  const text = note.body;
-  try {
-    await navigator.clipboard.writeText(text);
-    toast('Copied to clipboard', { kind: 'success', duration: 2000 });
-  } catch {
-    // Clipboard API needs permission/secure context; fall back to select+copy.
-    editor.focus();
-    editor.select();
-    const ok = hostDocument().execCommand?.('copy');
-    hostWindow().getSelection?.()?.removeAllRanges();
-    toast(ok ? 'Copied to clipboard' : 'Copy failed — select the text manually.', {
-      kind: ok ? 'success' : 'danger',
-      duration: 2600,
-    });
-  }
+  const ok = await writeToSystemClipboard(note.body);
+  toast(ok ? 'Copied to clipboard' : 'Copy failed — select the text manually.', {
+    kind: ok ? 'success' : 'danger',
+    duration: ok ? 2000 : 2600,
+  });
 }
 
 /* -------------------------------------------------------------------------- */
@@ -912,6 +1406,26 @@ importFile.addEventListener('change', async () => {
 
 btnReturn.addEventListener('click', closePip);
 
+/* --- tabs & clipboard ---------------------------------------------------- */
+
+tabNotes.addEventListener('click', () => setTab('notes', { focus: true }));
+tabClipboard.addEventListener('click', () => setTab('clipboard', { focus: true }));
+
+clipList.addEventListener('click', onClipAction);
+
+clipSearch.addEventListener('input', () => {
+  clipQuery = clipSearch.value;
+  renderClips();
+});
+
+btnClipGrab.addEventListener('click', grabSystemClipboard);
+btnClipAdd.addEventListener('click', beginAddSnippet);
+btnClipClear.addEventListener('click', clearHistory);
+btnClipCapture.addEventListener('click', () => {
+  setPrefs({ captureClipboard: !prefs.captureClipboard });
+  toast(`Auto-capture ${prefs.captureClipboard ? 'on' : 'off'}`, { duration: 2000 });
+});
+
 // If the browser opens a PiP window on its own, keep the UI honest.
 if (supportsDocumentPip(window)) {
   window.documentPictureInPicture.addEventListener?.('enter', (event) => {
@@ -926,6 +1440,16 @@ window.addEventListener('storage', (event) => {
   if (event.key === PREFS_KEY) {
     prefs = parsePrefs(event.newValue);
     applyPrefs();
+    setTab(prefs.tab);
+    return;
+  }
+  if (event.key === CLIP_STORAGE_KEY) {
+    if (pipWindow) return;
+    const incoming = deserializeClips(event.newValue);
+    if (incoming.length === clips.length) return;
+    clips = incoming;
+    renderClips();
+    renderClipCount();
     return;
   }
   if (event.key !== STORAGE_KEY || pipWindow) return;
@@ -950,6 +1474,10 @@ const refreshTimer = setInterval(() => {
       el.textContent = `${note?.pinned ? 'Pinned · ' : ''}${formatRelativeTime(ts)}`;
     }
   }
+  for (const el of clipList.querySelectorAll('[data-time]')) {
+    const ts = Number(el.dataset.time);
+    if (Number.isFinite(ts)) el.textContent = formatRelativeTime(ts);
+  }
 }, 30000);
 
 /**
@@ -972,6 +1500,7 @@ export function dispose() {
 
 function boot() {
   loadNotes();
+  loadClips();
 
   if (location.hash === '#standalone') {
     standbyStandalone = true;
@@ -982,6 +1511,9 @@ function boot() {
   applyPrefs();
   reflectCapability();
   renderAll();
+  renderClips();
+  renderClipCount();
+  setTab(prefs.tab);
   bindGlobals(window);
   setSaveState('saved');
 

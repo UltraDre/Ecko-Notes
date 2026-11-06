@@ -289,10 +289,14 @@ export const DEFAULT_PREFS = Object.freeze({
   fontSize: 15,
   wrap: true,
   sidebarOpen: true,
+  tab: 'notes', // 'notes' | 'clipboard'
+  captureClipboard: true, // auto-add in-app copy/cut/paste to the history
   pipWidth: 400,
   pipHeight: 560,
   useFallbackWindow: false, // user asked for a plain popup instead of PiP
 });
+
+export const TABS = ['notes', 'clipboard'];
 
 export const FONT_SIZE_MIN = 12;
 export const FONT_SIZE_MAX = 30;
@@ -336,6 +340,11 @@ export function normalizePrefs(raw = {}) {
     fontSize: clampFontSize(src.fontSize),
     wrap: src.wrap === undefined ? DEFAULT_PREFS.wrap : Boolean(src.wrap),
     sidebarOpen: src.sidebarOpen === undefined ? DEFAULT_PREFS.sidebarOpen : Boolean(src.sidebarOpen),
+    tab: TABS.includes(src.tab) ? src.tab : DEFAULT_PREFS.tab,
+    captureClipboard:
+      src.captureClipboard === undefined
+        ? DEFAULT_PREFS.captureClipboard
+        : Boolean(src.captureClipboard),
     pipWidth: size.width,
     pipHeight: size.height,
     useFallbackWindow: Boolean(src.useFallbackWindow),
