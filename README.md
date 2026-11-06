@@ -8,6 +8,9 @@ and the notepad detaches into a small always-on-top window that hovers above
 your editor, your browser, your terminal — anything — while you keep typing.
 Notes autosave as you go.
 
+There are two tabs: **Notes**, and a **Clipboard** history of snippets you can
+copy back out or drop into a note without leaving the floating window.
+
 ---
 
 ## Quick start
@@ -47,6 +50,7 @@ the app tells you plainly that the window cannot be forced on top.
 ## Features
 
 - **Always-on-top window** that remembers the size you leave it at
+- **Clipboard tab** — a snippet history that works from inside the floating window
 - Multiple notes with live search, pinning and duplicate
 - Autosave to `localStorage` on a 350 ms debounce, with a save indicator
 - First line of a note is its title — the editor stays a plain textarea
@@ -62,12 +66,42 @@ the app tells you plainly that the window cannot be forced on top.
 | Keys | Action |
 | --- | --- |
 | <kbd>Ctrl</kbd>/<kbd>⌘</kbd> + <kbd>Shift</kbd> + <kbd>P</kbd> | Toggle the floating window |
+| <kbd>Ctrl</kbd>/<kbd>⌘</kbd> + <kbd>Alt</kbd> + <kbd>C</kbd> | Switch Notes / Clipboard tab |
+| <kbd>Ctrl</kbd>/<kbd>⌘</kbd> + <kbd>Alt</kbd> + <kbd>G</kbd> | Grab the system clipboard |
 | <kbd>Ctrl</kbd>/<kbd>⌘</kbd> + <kbd>Alt</kbd> + <kbd>N</kbd> | New note |
 | <kbd>Ctrl</kbd>/<kbd>⌘</kbd> + <kbd>Alt</kbd> + <kbd>D</kbd> | Duplicate note |
+| <kbd>Ctrl</kbd>/<kbd>⌘</kbd> + <kbd>Enter</kbd> | Save a new snippet in the composer |
 | <kbd>Ctrl</kbd>/<kbd>⌘</kbd> + <kbd>S</kbd> | Save now |
 | <kbd>Ctrl</kbd>/<kbd>⌘</kbd> + <kbd>\</kbd> | Toggle sidebar |
-| <kbd>/</kbd> | Focus search |
-| <kbd>Esc</kbd> | Clear search |
+| <kbd>/</kbd> | Focus the search box of the current tab |
+| <kbd>Esc</kbd> | Clear search / cancel the composer |
+
+## The Clipboard tab
+
+A second tab holds a history of text snippets you can copy back out or insert
+straight into a note — which is most useful while the notepad is floating on top
+of whatever you are reading.
+
+**An important platform constraint:** a web page cannot watch your system
+clipboard. There is no clipboard-history API, and `navigator.clipboard.readText()`
+only works on an explicit user gesture, with permission, while the document is
+focused. So this history is filled in exactly three visible ways, never silently:
+
+| How | Mechanism |
+| --- | --- |
+| **Grab** button (<kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>G</kbd>) | `navigator.clipboard.readText()` |
+| Auto-capture | `copy` / `cut` / `paste` events *inside* Ecko; switchable off |
+| **+** button | An inline composer for typing or pasting a snippet by hand |
+
+The footer of the tab states this plainly rather than implying it can see
+everything you copy elsewhere.
+
+Each snippet can be **copied** back to the system clipboard, **inserted** at the
+caret of the current note, **pinned** to the top, or **deleted** (with Undo).
+Re-copying identical text bumps the existing entry instead of duplicating it,
+pinned snippets survive **Clear**, and the history is capped at 100 entries —
+dropping the oldest, never a pinned one.
+
 
 ## How the floating window works
 
@@ -108,13 +142,14 @@ matches only inside the floating window, so it cannot affect the docked view.
 ## Project layout
 
 ```
-index.html          Markup: #app (the notepad) + #pip-placeholder (shown in the tab)
+index.html          Markup: #app (tab bar + Notes/Clipboard panels) + #pip-placeholder
 styles/app.css      One stylesheet, shared by the tab and the PiP window
-src/notes.js        Pure data layer — no DOM, importable from Node
+src/notes.js        Pure note/prefs data layer — no DOM, importable from Node
+src/clipboard.js    Pure clipboard-history data layer — no DOM
 src/pip.js          Document PiP layer — detection, requestWindow, style copying
 src/app.js          Application shell and DOM wiring
 server.mjs          Zero-dependency static dev server
-test/               96 tests: notes.test.mjs, pip.test.mjs, app.test.mjs
+test/               159 tests: notes, clipboard, pip, app
 ```
 
 ## Tests
@@ -123,11 +158,17 @@ test/               96 tests: notes.test.mjs, pip.test.mjs, app.test.mjs
 npm test
 ```
 
-`notes.test.mjs` and `pip.test.mjs` cover the pure logic. `app.test.mjs` runs
+**159/159 passing** — 47 notes, 42 clipboard, 22 PiP layer, 48 integration.
+
+`notes.test.mjs`, `clipboard.test.mjs` and `pip.test.mjs` cover the pure logic.
+`app.test.mjs` runs
 the real `src/app.js` inside jsdom against a mocked `documentPictureInPicture`
 that hands back a genuinely separate jsdom `Window`, so assertions like
 `app.ownerDocument === pipDocument` are real cross-document checks: they prove
 the notepad actually adopted into the floating window and actually came back.
+The same harness mocks `navigator.clipboard` with a switchable behaviour, so the
+Grab, permission-denied, unsupported and empty-clipboard paths are all
+exercised, along with capture still working from inside the PiP window.
 
 **What this does not cover:** there is no browser binary in this environment, so
 the real Document PiP window — actual always-on-top behaviour, browser window

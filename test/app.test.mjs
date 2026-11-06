@@ -72,6 +72,31 @@ pipWindow.addEventListener('pagehide', () => {
 const downloads = [];
 URL.createObjectURL = () => 'blob:mock';
 URL.revokeObjectURL = () => {};
+
+/**
+ * Mockable system clipboard. `behavior = null` simulates a browser with no
+ * async Clipboard API at all; a rejecting `read` simulates a denied permission.
+ */
+const clipboardCalls = { written: [], reads: 0 };
+let clipboardBehavior = {
+  write: async (text) => {
+    clipboardCalls.written.push(text);
+  },
+  read: async () => 'text from the system clipboard',
+};
+Object.defineProperty(dom.window.navigator, 'clipboard', {
+  configurable: true,
+  get() {
+    if (clipboardBehavior === null) return undefined;
+    return {
+      writeText: (text) => clipboardBehavior.write(text),
+      readText: () => {
+        clipboardCalls.reads += 1;
+        return clipboardBehavior.read();
+      },
+    };
+  },
+});
 // The download anchor is created in whichever document currently hosts #app,
 // so both windows' prototypes need the stub.
 const stubAnchorClick = (win) => {
@@ -130,12 +155,27 @@ const modeLabel = doc.getElementById('mode-label');
 const floatLabel = doc.getElementById('float-btn-label');
 
 const click = (el) => el.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
+
+/**
+ * Toasts stack (up to three) and live for ~4s, so a selector like
+ * `.toast-action` can easily hit a leftover from an earlier test. These helpers
+ * make toast assertions independent of what came before.
+ */
+const toastRootEl = () => $('#toast-root');
+const clearToasts = () => toastRootEl().replaceChildren();
+const newestToast = () => {
+  const toasts = [...toastRootEl().querySelectorAll('.toast')];
+  return toasts.at(-1) || null;
+};
+const newestToastAction = () => newestToast()?.querySelector('.toast-action') || null;
 const type = (el, value) => {
   el.value = value;
   el.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
 };
 const storedNotes = () => JSON.parse(dom.window.localStorage.getItem('ecko.notes.v1') || '{}');
 const storedPrefs = () => JSON.parse(dom.window.localStorage.getItem('ecko.notes.prefs.v1') || '{}');
+const storedClips = () =>
+  JSON.parse(dom.window.localStorage.getItem('ecko.notes.clipboard.v1') || '{}').clips || [];
 const isFloating = () => app.ownerDocument === pipDom.window.document;
 
 /* ----------------------------------------------------------------- boot -- */
@@ -229,11 +269,12 @@ test('delete removes the note and the undo toast restores it', async () => {
   const before = storedNotes().notes.length;
   const deletedTitle = $('#editor-title').textContent;
 
+  clearToasts();
   click($('#btn-delete'));
   await flush();
   assert.equal(storedNotes().notes.length, before - 1);
 
-  const undo = doc.querySelector('#toast-root .toast-action');
+  const undo = newestToastAction();
   assert.ok(undo, 'an Undo action should be offered');
   click(undo);
   await flush();
@@ -474,10 +515,367 @@ test('download and export produce files without throwing', async () => {
   assert.match(downloads[1], /^ecko-notes-\d{4}-\d{2}-\d{2}\.json$/);
 });
 
-test('copy falls back gracefully when the clipboard API is unavailable', async () => {
-  assert.equal(dom.window.navigator.clipboard, undefined, 'jsdom has no clipboard');
-  assert.doesNotThrow(() => click($('#btn-copy')));
+test('copying a note writes to the system clipboard', async () => {
+  type(editor, 'Copy me please\nsecond line');
+  await wait(420);
+  clipboardCalls.written.length = 0;
+
+  click($('#btn-copy'));
   await flush();
+
+  assert.deepEqual(clipboardCalls.written, ['Copy me please\nsecond line']);
+});
+
+test('copying a note falls back when there is no Clipboard API', async () => {
+  clipboardBehavior = null;
+  try {
+    assert.equal(dom.window.navigator.clipboard, undefined, 'simulating an old browser');
+    assert.doesNotThrow(() => click($('#btn-copy')));
+    await flush();
+  } finally {
+    clipboardBehavior = {
+      write: async (text) => {
+        clipboardCalls.written.push(text);
+      },
+      read: async () => 'text from the system clipboard',
+    };
+  }
+});
+
+/* --------------------------------------------------------- clipboard tab -- */
+
+test('the clipboard tab starts hidden with Notes selected', () => {
+  assert.equal(app.dataset.tab, 'notes');
+  assert.equal($('#panel-notes').hidden, false);
+  assert.equal($('#panel-clipboard').hidden, true);
+  assert.equal($('#tab-notes').getAttribute('aria-selected'), 'true');
+  assert.equal($('#tab-clipboard').getAttribute('aria-selected'), 'false');
+  assert.equal($('#clip-count').hidden, true, 'badge hidden while empty');
+});
+
+test('clicking the tab switches panels and persists the choice', () => {
+  click($('#tab-clipboard'));
+
+  assert.equal(app.dataset.tab, 'clipboard');
+  assert.equal($('#panel-clipboard').hidden, false);
+  assert.equal($('#panel-notes').hidden, true);
+  assert.equal($('#tab-clipboard').getAttribute('aria-selected'), 'true');
+  assert.equal($('#tab-notes').getAttribute('aria-selected'), 'false');
+  assert.equal(storedPrefs().tab, 'clipboard');
+
+  click($('#tab-notes'));
+  assert.equal(app.dataset.tab, 'notes');
+  assert.equal(storedPrefs().tab, 'notes');
+});
+
+test('Ctrl+Alt+C toggles between the tabs', () => {
+  const press = () =>
+    dom.window.dispatchEvent(
+      new dom.window.KeyboardEvent('keydown', {
+        key: 'c',
+        ctrlKey: true,
+        altKey: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+
+  press();
+  assert.equal(app.dataset.tab, 'clipboard');
+  press();
+  assert.equal(app.dataset.tab, 'notes');
+});
+
+test('copying inside the editor is auto-captured into the history', async () => {
+  // This has to happen on the Notes tab: an element inside a hidden panel
+  // cannot receive focus in jsdom or in a real browser, so there would be no
+  // selection to capture. Copying is a Notes-tab action anyway.
+  click($('#tab-notes'));
+  assert.equal(storedClips().length, 0);
+
+  type(editor, 'capture this snippet\nrest of the note');
+  editor.focus();
+  assert.equal(doc.activeElement, editor, 'precondition: the editor holds focus');
+  editor.setSelectionRange(0, 'capture this snippet'.length);
+  dom.window.dispatchEvent(new dom.window.Event('copy', { bubbles: true }));
+  await flush();
+
+  const clips = storedClips();
+  assert.equal(clips.length, 1);
+  assert.equal(clips[0].text, 'capture this snippet');
+  assert.equal(clips[0].source, 'copy');
+
+  click($('#tab-clipboard'));
+  assert.equal($('#clip-list').querySelectorAll('.clip-item').length, 1);
+  assert.equal($('#clip-count').hidden, false, 'badge appears once there is history');
+  assert.equal($('#clip-count').textContent, '1');
+});
+
+test('pasting is auto-captured from the paste event payload', async () => {
+  const event = new dom.window.Event('paste', { bubbles: true });
+  Object.defineProperty(event, 'clipboardData', {
+    value: { getData: (type) => (type === 'text/plain' ? 'pasted from elsewhere' : '') },
+  });
+  dom.window.dispatchEvent(event);
+  await flush();
+
+  const clips = storedClips();
+  assert.equal(clips.length, 2);
+  assert.ok(clips.some((c) => c.text === 'pasted from elsewhere' && c.source === 'paste'));
+});
+
+test('our own copy button does not re-capture what it just wrote', async () => {
+  const before = storedClips().length;
+  clipboardCalls.written.length = 0;
+
+  click($('#tab-notes'));
+  click($('#btn-copy'));
+  await flush();
+
+  assert.equal(clipboardCalls.written.length, 1, 'it did write to the system clipboard');
+  assert.equal(storedClips().length, before, 'but it must not duplicate into history');
+});
+
+test('auto-capture can be switched off', async () => {
+  click($('#tab-clipboard'));
+  assert.equal($('#btn-clip-capture').getAttribute('aria-pressed'), 'true');
+
+  click($('#btn-clip-capture'));
+  assert.equal($('#btn-clip-capture').getAttribute('aria-pressed'), 'false');
+  assert.equal(storedPrefs().captureClipboard, false);
+
+  const before = storedClips().length;
+  editor.focus();
+  editor.setSelectionRange(0, 8);
+  dom.window.dispatchEvent(new dom.window.Event('copy', { bubbles: true }));
+  await flush();
+  assert.equal(storedClips().length, before, 'nothing captured while off');
+
+  click($('#btn-clip-capture'));
+  assert.equal(storedPrefs().captureClipboard, true);
+});
+
+test('Grab pulls the system clipboard into the history', async () => {
+  clipboardCalls.reads = 0;
+  click($('#btn-clip-grab'));
+  await flush();
+
+  assert.equal(clipboardCalls.reads, 1, 'readText must be called from the gesture');
+  const clips = storedClips();
+  assert.ok(clips.some((c) => c.text === 'text from the system clipboard'));
+  assert.equal(clips.find((c) => c.text === 'text from the system clipboard').source, 'grab');
+});
+
+test('Grab reports a denied permission instead of throwing', async () => {
+  clipboardBehavior = {
+    write: async () => {},
+    read: async () => {
+      throw new DOMException('Permission denied', 'NotAllowedError');
+    },
+  };
+  const before = storedClips().length;
+
+  clearToasts();
+  click($('#btn-clip-grab'));
+  await flush();
+
+  assert.equal(storedClips().length, before, 'nothing added on denial');
+  assert.match(newestToast().textContent, /denied/i);
+
+  clipboardBehavior = {
+    write: async (text) => {
+      clipboardCalls.written.push(text);
+    },
+    read: async () => 'text from the system clipboard',
+  };
+});
+
+test('Grab explains itself when the browser has no clipboard-read', async () => {
+  clipboardBehavior = null;
+  clearToasts();
+  click($('#btn-clip-grab'));
+  await flush();
+  assert.match(newestToast().textContent, /will not let a web page read/i);
+  clipboardBehavior = {
+    write: async (text) => {
+      clipboardCalls.written.push(text);
+    },
+    read: async () => 'text from the system clipboard',
+  };
+});
+
+test('Grab handles an empty system clipboard', async () => {
+  clipboardBehavior = { write: async () => {}, read: async () => '   ' };
+  const before = storedClips().length;
+  clearToasts();
+  click($('#btn-clip-grab'));
+  await flush();
+  assert.equal(storedClips().length, before);
+  assert.match(newestToast().textContent, /empty/i);
+  clipboardBehavior = {
+    write: async (text) => {
+      clipboardCalls.written.push(text);
+    },
+    read: async () => 'text from the system clipboard',
+  };
+});
+
+test('Copy on a snippet writes it back to the system clipboard', async () => {
+  click($('#tab-clipboard'));
+  clipboardCalls.written.length = 0;
+
+  const first = $('#clip-list').querySelector('.clip-item');
+  const expected = storedClips().find((c) => c.id === first.dataset.id).text;
+  click(first.querySelector('.clip-action[data-act="copy"]'));
+  await flush();
+
+  assert.deepEqual(clipboardCalls.written, [expected]);
+});
+
+test('Insert puts a snippet into the note and switches back to Notes', async () => {
+  click($('#tab-clipboard'));
+  const first = $('#clip-list').querySelector('.clip-item');
+  const expected = storedClips().find((c) => c.id === first.dataset.id).text;
+
+  click(first.querySelector('.clip-action[data-act="insert"]'));
+  await wait(420);
+
+  assert.equal(app.dataset.tab, 'notes', 'insert should return the user to the note');
+  assert.ok(editor.value.includes(expected), `editor should contain the snippet: ${editor.value}`);
+  assert.ok(storedNotes().notes.some((n) => n.body.includes(expected)), 'and it must be saved');
+});
+
+test('Pin holds a snippet at the top and survives Clear', async () => {
+  click($('#tab-clipboard'));
+  const items = [...$('#clip-list').querySelectorAll('.clip-item')];
+  const target = items.at(-1);
+  const targetId = target.dataset.id;
+
+  click(target.querySelector('.clip-action[data-act="pin"]'));
+  const pinned = $('#clip-list').querySelector(`.clip-item[data-id="${targetId}"]`);
+  assert.equal(pinned.dataset.pinned, 'true');
+  assert.equal(
+    $('#clip-list').querySelector('.clip-item').dataset.id,
+    targetId,
+    'a pinned snippet sorts to the top',
+  );
+  assert.match($('#clip-sub').textContent, /pinned/);
+
+  clearToasts();
+  click($('#btn-clip-clear'));
+  await flush();
+  const remaining = storedClips();
+  assert.equal(remaining.length, 1, 'Clear keeps only the pinned snippet');
+  assert.equal(remaining[0].id, targetId);
+  assert.match(newestToast().textContent, /pinned kept/i);
+});
+
+test('Clear can be undone', async () => {
+  click($('#btn-clip-grab'));
+  await flush();
+  const before = storedClips().length;
+  assert.ok(before > 1, 'precondition: more than the pinned snippet');
+
+  clearToasts();
+  click($('#btn-clip-clear'));
+  await flush();
+  assert.equal(storedClips().length, 1);
+
+  const undo = newestToastAction();
+  assert.ok(undo, 'Clear should offer Undo');
+  click(undo);
+  await flush();
+  assert.equal(storedClips().length, before, 'Undo restores the whole history');
+});
+
+test('Delete removes a snippet and Undo brings it back', async () => {
+  click($('#tab-clipboard'));
+  const before = storedClips().length;
+  const first = $('#clip-list').querySelector('.clip-item');
+  const removedText = storedClips().find((c) => c.id === first.dataset.id).text;
+
+  clearToasts();
+  click(first.querySelector('.clip-action[data-act="delete"]'));
+  await flush();
+  assert.equal(storedClips().length, before - 1);
+
+  const undo = newestToastAction();
+  assert.ok(undo, 'Delete should offer Undo');
+  click(undo);
+  await flush();
+  assert.equal(storedClips().length, before);
+  assert.ok(storedClips().some((c) => c.text === removedText));
+});
+
+test('the manual composer adds a snippet without window.prompt', async () => {
+  click($('#tab-clipboard'));
+  const before = storedClips().length;
+
+  click($('#btn-clip-add'));
+  const composer = $('#clip-list .clip-composer');
+  assert.ok(composer, 'an inline composer should appear');
+
+  const input = composer.querySelector('.clip-composer-input');
+  type(input, 'a manually typed snippet');
+  click(composer.querySelector('.clip-action'));
+  await flush();
+
+  assert.equal($('#clip-list .clip-composer'), null, 'composer closes after saving');
+  assert.equal(storedClips().length, before + 1);
+  assert.ok(storedClips().some((c) => c.text === 'a manually typed snippet'));
+});
+
+test('searching the clipboard filters the list only', () => {
+  click($('#tab-clipboard'));
+  const all = $('#clip-list').querySelectorAll('.clip-item').length;
+
+  type($('#clip-search'), 'zzzz-no-match');
+  assert.equal($('#clip-list').querySelectorAll('.clip-item').length, 0);
+  assert.equal($('#clip-empty').hidden, false);
+  assert.match($('#clip-empty-title').textContent, /No matching snippets/);
+
+  type($('#clip-search'), '');
+  assert.equal($('#clip-list').querySelectorAll('.clip-item').length, all);
+  assert.equal($('#clip-empty').hidden, true);
+});
+
+test('the clipboard tab keeps working inside the floating window', async () => {
+  click($('#btn-float'));
+  await flush();
+  assert.ok(isFloating(), 'precondition: floating');
+
+  click($('#tab-clipboard'));
+  assert.equal(app.dataset.tab, 'clipboard');
+  assert.equal(
+    $('#clip-list').ownerDocument,
+    pipDom.window.document,
+    'the clipboard list must live in the PiP document',
+  );
+  assert.ok($('#clip-list').querySelectorAll('.clip-item').length > 0);
+
+  // Capture must still work: the copy listener was re-bound to the PiP window.
+  const before = storedClips().length;
+  const event = new pipWindow.Event('paste', { bubbles: true });
+  Object.defineProperty(event, 'clipboardData', {
+    value: { getData: () => 'pasted while floating' },
+  });
+  pipWindow.dispatchEvent(event);
+  await flush();
+  assert.equal(storedClips().length, before + 1, 'capture works from the PiP window');
+
+  click($('#btn-float'));
+  await flush();
+  assert.equal(isFloating(), false);
+});
+
+test('clipboard history survives a reload', () => {
+  const stored = storedClips();
+  assert.ok(stored.length > 0);
+  // The floating-window test above ended on the Clipboard tab; the choice is
+  // persisted, so a reload should come back on it.
+  assert.equal(storedPrefs().tab, 'clipboard');
+  // deserializeClips() runs on every boot; assert the stored shape is valid.
+  assert.ok(stored.every((c) => typeof c.text === 'string' && typeof c.id === 'string'));
 });
 
 /* -------------------------------------------------------------- teardown -- */

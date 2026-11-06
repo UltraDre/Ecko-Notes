@@ -23,7 +23,47 @@
         always-on-top PiP window and moved back on `pagehide`. One element, one
         set of listeners, one source of truth — nothing is cloned or mirrored.
       -->
-      <main id="app" class="app" data-mode="docked">
+      <main id="app" class="app" data-mode="docked" data-tab="notes">
+        <!--
+          The tab strip sits above both panels and is a direct child of #app,
+          so it stays reachable when the sidebar is hidden inside the floating
+          window — the clipboard tab is most useful there, not least.
+        -->
+        <nav class="tab-bar" role="tablist" aria-label="Views">
+          <button
+            id="tab-notes"
+            class="tab"
+            type="button"
+            role="tab"
+            aria-selected="true"
+            aria-controls="panel-notes"
+            title="Notes (Ctrl+Alt+C toggles)"
+          >
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+              <path d="M5 6h14M5 12h14M5 18h8" />
+            </svg>
+            Notes
+          </button>
+          <button
+            id="tab-clipboard"
+            class="tab"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="panel-clipboard"
+            title="Clipboard history (Ctrl+Alt+C toggles)"
+          >
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="8" y="3.5" width="8" height="4" rx="1.4" />
+              <path d="M16 5.5h2.2A1.8 1.8 0 0 1 20 7.3v11.4a1.8 1.8 0 0 1-1.8 1.8H5.8A1.8 1.8 0 0 1 4 18.7V7.3a1.8 1.8 0 0 1 1.8-1.8H8" />
+              <path d="M8.5 12h7M8.5 15.5h4.5" />
+            </svg>
+            Clipboard
+            <span id="clip-count" class="tab-badge" hidden>0</span>
+          </button>
+        </nav>
+
+        <div id="panel-notes" class="panel" role="tabpanel" aria-labelledby="tab-notes">
         <aside id="sidebar" class="sidebar">
           <header class="side-head">
             <div class="brand">
@@ -173,6 +213,70 @@
             </div>
           </footer>
         </section>
+        </div>
+
+        <div id="panel-clipboard" class="panel" role="tabpanel" aria-labelledby="tab-clipboard" hidden>
+          <header class="clip-bar">
+            <div class="clip-heading">
+              <h2 id="clip-title" class="clip-title">Clipboard</h2>
+              <p id="clip-sub" class="clip-sub">0 snippets</p>
+            </div>
+            <div class="clip-tools">
+              <button id="btn-clip-grab" class="btn btn-accent btn-sm" type="button" title="Read the system clipboard now (Ctrl+Alt+G)">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M12 4v10M8 10.5l4 4 4-4" /><path d="M4.5 19h15" />
+                </svg>
+                Grab
+              </button>
+              <button id="btn-clip-add" class="icon-btn" type="button" title="Add a snippet manually" aria-label="Add a snippet manually">
+                <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+              </button>
+              <button id="btn-clip-capture" class="icon-btn" type="button" aria-pressed="true" aria-label="Toggle auto-capture" title="Auto-capture: on">
+                <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <circle cx="12" cy="12" r="3" /><path d="M12 3v2.5M12 18.5V21M3 12h2.5M18.5 12H21M5.6 5.6l1.8 1.8M16.6 16.6l1.8 1.8M18.4 5.6l-1.8 1.8M7.4 16.6l-1.8 1.8" />
+                </svg>
+              </button>
+              <button id="btn-clip-clear" class="icon-btn icon-btn-danger" type="button" title="Clear unpinned snippets" aria-label="Clear unpinned snippets">
+                <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M4.5 7h15M9.5 7V5.2A1.2 1.2 0 0 1 10.7 4h2.6a1.2 1.2 0 0 1 1.2 1.2V7M6.5 7l.9 12.1A1.9 1.9 0 0 0 9.3 21h5.4a1.9 1.9 0 0 0 1.9-1.9L17.5 7" />
+                </svg>
+              </button>
+            </div>
+          </header>
+
+          <div class="search-wrap clip-search">
+            <svg class="search-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+              <circle cx="11" cy="11" r="7" /><path d="M20 20l-3.6-3.6" />
+            </svg>
+            <input
+              id="clip-search"
+              class="search"
+              type="search"
+              placeholder="Search snippets…"
+              autocomplete="off"
+              spellcheck="false"
+              aria-label="Search clipboard snippets"
+            />
+          </div>
+
+          <ul id="clip-list" class="clip-list" role="list"></ul>
+
+          <div id="clip-empty" class="empty-list" hidden>
+            <p class="empty-title" id="clip-empty-title">Clipboard is empty</p>
+            <p class="empty-sub" id="clip-empty-sub">
+              Press Grab to pull in whatever is on your system clipboard, or copy
+              something inside Ecko.
+            </p>
+          </div>
+
+          <footer class="clip-foot">
+            <p class="clip-notice">
+              Browsers don&rsquo;t let a web page watch your system clipboard, so this
+              history fills from <strong>Grab</strong> and from copying or pasting
+              inside Ecko &mdash; never silently in the background.
+            </p>
+          </footer>
+        </div>
 
         <!--
           The Float button is the only control that must live inside #app: it
