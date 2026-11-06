@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark light" />
+    <meta
+      name="description"
+      content="Ecko Notes — a floating notepad that stays on top of every other window, powered by the Document Picture-in-Picture API."
+    />
+    <title>Ecko Notes — floating notepad</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230f1519'/%3E%3Cpath d='M8 9h16M8 15h16M8 21h10' stroke='%236ee7a8' stroke-width='2.5' stroke-linecap='round'/%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="styles/app.css" />
+  </head>
+  <body>
+    <div id="stage">
+      <!--
+        #app is the whole notepad. It normally lives here in the tab; when the
+        user clicks "Float on top" this exact element is moved into the
+        always-on-top PiP window and moved back on `pagehide`. One element, one
+        set of listeners, one source of truth — nothing is cloned or mirrored.
+      -->
+      <main id="app" class="app" data-mode="docked">
+        <aside id="sidebar" class="sidebar">
+          <header class="side-head">
+            <div class="brand">
+              <span class="brand-mark" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                  <path d="M5 6h14M5 12h14M5 18h8" />
+                </svg>
+              </span>
+              <span class="brand-name">Ecko Notes</span>
+            </div>
+            <button id="btn-new" class="btn btn-accent btn-sm" type="button" title="New note (Ctrl+Alt+N)">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true">
+                <path d="M12 5v14M5 12h14" />
+              </svg>
+              New
+            </button>
+          </header>
+
+          <div class="search-wrap">
+            <svg class="search-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+              <circle cx="11" cy="11" r="7" /><path d="M20 20l-3.6-3.6" />
+            </svg>
+            <input
+              id="search"
+              class="search"
+              type="search"
+              placeholder="Search notes…"
+              autocomplete="off"
+              spellcheck="false"
+              aria-label="Search notes"
+            />
+            <button id="btn-clear-search" class="search-clear" type="button" title="Clear search" hidden>
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true">
+                <path d="M6 6l12 12M18 6L6 18" />
+              </svg>
+            </button>
+          </div>
+
+          <ul id="note-list" class="note-list" role="list"></ul>
+
+          <div id="empty-list" class="empty-list" hidden>
+            <p class="empty-title">No notes found</p>
+            <p class="empty-sub" id="empty-sub">Create one to get started.</p>
+          </div>
+
+          <footer class="side-foot">
+            <span id="totals" class="totals">0 notes</span>
+            <div class="side-foot-actions">
+              <button id="btn-import" class="btn btn-ghost btn-xs" type="button" title="Import a JSON export">Import</button>
+              <button id="btn-export" class="btn btn-ghost btn-xs" type="button" title="Export everything as JSON">Export</button>
+            </div>
+          </footer>
+          <input id="import-file" type="file" accept="application/json,.json" hidden />
+        </aside>
+
+        <section class="editor-pane">
+          <header class="editor-bar">
+            <button
+              id="btn-toggle-sidebar"
+              class="icon-btn"
+              type="button"
+              title="Toggle sidebar (Ctrl+\)"
+              aria-label="Toggle sidebar"
+            >
+              <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true">
+                <rect x="3" y="4" width="18" height="16" rx="2.5" /><path d="M9.5 4v16" />
+              </svg>
+            </button>
+
+            <div class="editor-heading">
+              <h1 id="editor-title" class="editor-title">Untitled note</h1>
+              <p id="editor-meta" class="editor-meta">edited just now</p>
+            </div>
+
+            <div class="editor-tools">
+              <button id="btn-pin" class="icon-btn" type="button" title="Pin note to top" aria-pressed="false">
+                <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M9 3h6l-1 6 3.5 3v2h-11v-2L10 9z" /><path d="M12 14v7" />
+                </svg>
+              </button>
+              <button id="btn-font-down" class="icon-btn" type="button" title="Decrease font size" aria-label="Decrease font size">
+                <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" aria-hidden="true"><path d="M5 12h14" /></svg>
+              </button>
+              <button id="btn-font-up" class="icon-btn" type="button" title="Increase font size" aria-label="Increase font size">
+                <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+              </button>
+              <button id="btn-font-family" class="icon-btn" type="button" title="Cycle font: mono / serif / sans" aria-label="Cycle font family">
+                <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true">
+                  <path d="M4 18 8.5 6l4.5 12M5.8 14h5.4" /><path d="M16 18V9.5M16 12h4M20 18V9.5" />
+                </svg>
+              </button>
+              <button id="btn-wrap" class="icon-btn" type="button" title="Toggle soft wrap" aria-pressed="true" aria-label="Toggle soft wrap">
+                <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M4 7h16M4 12h13a3 3 0 0 1 0 6h-3" /><path d="M6.5 15.5 4 18l2.5 2.5" /><path d="M4 21h6" />
+                </svg>
+              </button>
+              <button id="btn-theme" class="icon-btn" type="button" title="Cycle theme: dark / light / system" aria-label="Cycle theme">
+                <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <circle cx="12" cy="12" r="4.2" /><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.2 5.2l1.4 1.4M17.4 17.4l1.4 1.4M18.8 5.2l-1.4 1.4M6.6 17.4l-1.4 1.4" />
+                </svg>
+              </button>
+              <span class="tool-sep" aria-hidden="true"></span>
+              <button id="btn-copy" class="icon-btn" type="button" title="Copy note to clipboard" aria-label="Copy note">
+                <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <rect x="9" y="9" width="11" height="11" rx="2.2" /><path d="M5.5 15H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h9a1 1 0 0 1 1 1v.5" />
+                </svg>
+              </button>
+              <button id="btn-download" class="icon-btn" type="button" title="Download note as Markdown" aria-label="Download note">
+                <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M12 4v10M8 11l4 4 4-4M4.5 19h15" />
+                </svg>
+              </button>
+              <button id="btn-duplicate" class="icon-btn" type="button" title="Duplicate note" aria-label="Duplicate note">
+                <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M8 8h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2z" /><path d="M15 5H6a2 2 0 0 0-2 2v9" />
+                </svg>
+              </button>
+              <button id="btn-delete" class="icon-btn icon-btn-danger" type="button" title="Delete note" aria-label="Delete note">
+                <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M4.5 7h15M9.5 7V5.2A1.2 1.2 0 0 1 10.7 4h2.6a1.2 1.2 0 0 1 1.2 1.2V7M6.5 7l.9 12.1A1.9 1.9 0 0 0 9.3 21h5.4a1.9 1.9 0 0 0 1.9-1.9L17.5 7" />
+                </svg>
+              </button>
+            </div>
+          </header>
+
+          <div class="editor-scroll">
+            <textarea
+              id="editor"
+              class="editor"
+              spellcheck="true"
+              autocomplete="off"
+              autocapitalize="off"
+              placeholder="Start typing…  The first line becomes the title."
+              aria-label="Note body"
+            ></textarea>
+          </div>
+
+          <footer class="status-bar">
+            <div class="status-left">
+              <span id="stat-words">0 words</span>
+              <span id="stat-chars">0 chars</span>
+              <span id="stat-read">0s read</span>
+            </div>
+            <div class="status-right">
+              <span id="save-state" class="save-state" data-state="idle">Saved</span>
+              <span id="mode-label" class="mode-label">Docked in tab</span>
+            </div>
+          </footer>
+        </section>
+
+        <!--
+          The Float button is the only control that must live inside #app: it
+          has to remain clickable from inside the PiP window so the user can
+          dock back down without hunting for the browser's "back to tab" chip.
+        -->
+        <button id="btn-float" class="float-btn" type="button" title="Float on top of all windows (Ctrl+Shift+P)">
+          <span class="float-btn-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="5" width="18" height="14" rx="2.4" />
+              <rect x="12.5" y="11.5" width="8" height="7" rx="1.6" fill="currentColor" fill-opacity="0.28" />
+            </svg>
+          </span>
+          <span id="float-btn-label" class="float-btn-label">Float on top</span>
+        </button>
+
+        <div id="toast-root" class="toast-root" role="status" aria-live="polite"></div>
+      </main>
+
+      <!-- Shown in the tab only while #app is living inside the PiP window. -->
+      <div id="pip-placeholder" class="placeholder" hidden>
+        <div class="placeholder-card">
+          <div class="placeholder-art" aria-hidden="true">
+            <svg viewBox="0 0 120 96" width="150" height="120" fill="none">
+              <rect x="6" y="8" width="108" height="72" rx="7" stroke="currentColor" stroke-opacity="0.35" stroke-width="2" />
+              <rect x="52" y="34" width="62" height="52" rx="6" stroke="currentColor" stroke-width="2.2" fill="currentColor" fill-opacity="0.1" />
+              <path d="M60 46h44M60 55h44M60 64h28" stroke="currentColor" stroke-opacity="0.55" stroke-width="2.2" stroke-linecap="round" />
+            </svg>
+          </div>
+          <h2 class="placeholder-title">Floating above everything</h2>
+          <p class="placeholder-text">
+            Your notepad is pinned on top of every other window in an always-on-top
+            Document Picture-in-Picture window. It stays live and keeps saving while
+            you work elsewhere.
+          </p>
+          <button id="btn-return" class="btn btn-accent" type="button">Bring it back to this tab</button>
+          <p class="placeholder-hint">Closing the floating window does the same thing.</p>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="src/app.js"></script>
+  </body>
+</html>

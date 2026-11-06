@@ -1,0 +1,19 @@
+{
+  "name": "ecko-notes",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Ecko Notes — a floating, always-on-top notepad web app powered by the Document Picture-in-Picture API.",
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node server.mjs",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18.17"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "jsdom": "^31.0.0"
+  }
+}
